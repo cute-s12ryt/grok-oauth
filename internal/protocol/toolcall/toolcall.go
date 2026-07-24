@@ -72,8 +72,8 @@ var aliases = map[string]string{
 	"uri": "url", "href": "url", "regex": "pattern", "glob_pattern": "pattern",
 }
 
-// Edit/Update-only aliases. Keep global "search"→query for Grep; map search/replace
-// only when the tool is an edit rewrite (Grok often emits search/replace for Update).
+// Edit/Update-only aliases. Grep's tool-specific normalization maps search/query
+// to pattern; edit rewrites map search/replace to old_string/new_string.
 var editOnlyAliases = map[string]string{
 	"search": "old_string", "search_string": "old_string", "searchtext": "old_string", "search_text": "old_string",
 	"searchfor": "old_string", "search_for": "old_string", "findtext": "old_string", "find_text": "old_string",
@@ -2968,7 +2968,6 @@ func ProjectShellArgsForClient(argsJSON, toolName, preferredKey string) string {
 	return encoded
 }
 
-
 // coerceShellNumericField converts JSON float-looking numbers for Codex shell
 // integer fields (yield_time_ms, max_output_tokens, timeout, etc.) to int64.
 // Codex rejects float literals such as 10000.0 with "expected u64".
@@ -3290,4 +3289,3 @@ func truncateForLog(s string, n int) string {
 // - Do NOT inject PowerShell instructions into the prompt (would bust cache).
 // - Do NOT rewrite command text (bash↔PS heuristics removed).
 // - Upstream shell schema is string-only; residual arrays are flattened without bash-style single quotes.
-
