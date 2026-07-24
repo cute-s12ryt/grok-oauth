@@ -21,7 +21,7 @@
 - **Hybrid 存储（默认强制）**：PostgreSQL 持久 + Redis 热状态 + 多 Worker
 - **大账号池轮询**：`round_robin` / `least_used` / `random`；**没额度立即冷却踢出**；pick-time inflight 负载分散
 - **会话粘性 / Prompt Cache**：`prompt_cache_key` / Claude session / messages hash；model 隔离绑定；TTL 可热改
-- **协议注册**：内置 `grok-build-auth`（纯 HTTP，无需 Chromium）；**SSO 入库**；可选 **注册成功后自动推 sub2api / CLIProxyAPI**
+- **协议注册**：内置 `grok-build-auth`（纯 HTTP，无需 Chromium）；Device Flow 默认、Grok Build OAuth 可选；**SSO 入库**；可选 **注册成功后自动推 sub2api / CLIProxyAPI**
 - **中继友好**：兼容 new-api / sub2api / CLIProxyAPI / Claude Code / Codex；`Update`/`StrReplace` → `Edit`；**后到完整参数覆盖错误路径**
 - **秒开流 + 可观测**：early SSE 信封；用量明细含 `ttft_ms` / `latency_ms` / **思考强度**；任务日志 + 终态帧
 
@@ -56,7 +56,7 @@
 | OpenAI 兼容 | `/v1/models` · `/v1/chat/completions` · `/v1/responses` · SSE |
 | Anthropic 兼容 | `/v1/messages` · tools / tool_use · `count_tokens` |
 | Claude Code 工具 | Grok `Update`/`StrReplace` → 客户端 `Edit`；**后到完整参数覆盖错误路径（含 both-complete）**；`target_file` 等别名归一；残缺编辑不下发 |
-| 注册机 | 批次自愈 + 孤儿回收；全局 inflight；Device Flow 重试；**SSO 入库 + 文件备份**；导出可走账号库；进度卡防连环 toast |
+| 注册机 | 批次自愈 + 孤儿回收；全局 inflight；Device Flow 默认 / Grok Build OAuth 可选；OTP 正规化；**SSO 入库 + 文件备份**；导出可走账号库；进度卡防连环 toast |
 | 管理台 | 账号、Key、协议注册、测活、续期、任务日志、用量、**系统设置（维护/压缩/探测/sub2api · CLIProxyAPI · 版本与热更新）** |
 | 多账号轮询 | `round_robin` / `least_used` / `random`；**pick-time inflight 分散**；可选**出站代理池** |
 | 会话粘性 | `prompt_cache_key` / `previous_response_id` 粘同一账号；**TTL 可热改** |
@@ -129,6 +129,7 @@ TURNSTILE_THREAD=3 GROK2API_REG_CONCURRENCY=3 docker compose up -d --build
 | `GROK2API_REG_GLOBAL_INFLIGHT` | `6` | 跨批次全局同时注册上限 |
 | `GROK2API_REG_TTL_SEC` | `259200`（72h） | 注册批次/会话 Redis TTL（大批量可调高） |
 | `GROK2API_REG_WATCHDOG_SEC` | `45` | 运行中自愈扫描间隔 |
+| `GROK2API_REG_AUTH_FLOW` | `device` | 協議註冊完成後的 token 交換：`device` / `oauth` |
 | `GROK2API_SSO_DEVICE_RETRIES` | `6` | device-flow 限流重试次数 |
 | `TURNSTILE_THREAD` | `= REG_CONCURRENCY` | 本地过盾浏览器线程数 |
 | `TURNSTILE_BROWSER_TYPE` | `camoufox` | 过盾浏览器类型 |
@@ -489,6 +490,37 @@ API：
 本地过盾默认与主容器同进程（`127.0.0.1:5072`），**无需填写 URL**；选 YesCaptcha 时仅用云端 Key。
 邮箱有效期：MoeMail 支持 1 小时 / 1 天 / 3 天 / 永久；YYDS / GPTMail 临时邮箱约 24 小时。
 新注册账号入池后默认 **延迟 30s** 再自动测活；可在管理台「测活等待秒」调整，或用环境变量 `GROK2API_REG_PROBE_DELAY_SEC`（`0`=立即测活）。
+
+#### 註冊後認證交換
+
+協議註冊 worker 完成信箱驗證、帳號建立並取得 xAI session 後，會依 `GROK2API_REG_AUTH_FLOW` 選擇 token 交換方式，再沿用相同的帳號匯入格式寫入 PostgreSQL：
+
+| 設定值 | 行為 |
+|--------|------|
+| `device` | **預設值**。以既有 SSO Device Flow 交換 token，保留限流退避與重試機制。 |
+| `oauth` | 使用純 HTTP Grok Build Authorization Code + PKCE 流程，不需要 Chromium。 |
+
+在 `.env` 設定後重新建立應用容器，讓新的環境變數生效：
+
+```env
+# 預設：SSO Device Flow
+GROK2API_REG_AUTH_FLOW=device
+
+# 可選：Grok Build OAuth + PKCE
+# GROK2API_REG_AUTH_FLOW=oauth
+```
+
+```bash
+docker compose up -d --force-recreate grokcli-2api
+```
+
+行為與安全邊界：
+
+- 此變數只控制**管理台協議註冊 worker 的註冊後 token 交換**，不會改變「SSO Cookie 手動匯入」的流程。
+- `oauth` 模式失敗時會明確結束該次註冊，不會靜默降級成 Device Flow，避免認證語意與稽核結果不一致。
+- OAuth callback 會嚴格驗證 `state`，並使用 PKCE 保護授權碼交換；管理台 worker 不會額外寫出 OAuth token 檔案。
+- 郵件安全碼支援 `AAA-BBB` 與六位英數格式；worker 會移除分隔符號並正規化為六位大寫英數後再驗證。
+- 未設定、空值或 `device` 均採 Device Flow；其他未知值會直接回報設定錯誤。
 
 ---
 
