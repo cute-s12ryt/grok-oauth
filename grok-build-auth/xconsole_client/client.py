@@ -511,17 +511,13 @@ class XConsoleAuthClient:
         self._last_rsc_body = rsc_body  # store for fetch_sso_token()
         self._last_create_set_cookies = list(set_cookies or [])
 
-        # Current xAI Next.js sign-up actions return HTTP 200 with an RSC flight
-        # body (often starting with `2:"$Sreact.fragment"`). That is SUCCESS for
-        # transport purposes. Only mark failure on non-200 or explicit hard errors.
+        # HTTP 200 is only transport success. Require positive account/session
+        # evidence before treating the sign-up action itself as successful.
         looks_ok = self._signup_response_looks_ok(
             rsc_body, set_cookies or [], resp_headers or {}
         )
         hard_error = self._signup_response_is_hard_error(rsc_body)
-        if status == 200 and not hard_error:
-            ok = True
-        else:
-            ok = (status == 200) and looks_ok and not hard_error
+        ok = status == 200 and looks_ok and not hard_error
         if self.debug:
             print(
                 f"  [create_account] HTTP {status} ok={ok} "
@@ -644,8 +640,8 @@ class XConsoleAuthClient:
         That is *not* a failure. Real failures usually embed WKE / error codes
         or a Next.js error flight (`0:E{...}`).
 
-        Policy: on ambiguous HTTP 200 bodies, prefer True and let SSO extraction
-        decide. Only return False for clear hard errors.
+        Policy: unknown HTTP 200 bodies fail closed. A successful result needs a
+        recognized RSC shape, session marker, or authentication cookie.
         """
         text = (rsc_body or "")
         text_l = text.lower()
@@ -717,11 +713,7 @@ class XConsoleAuthClient:
             if stripped != "":
                 return True
 
-        # Unknown non-error HTTP 200 body: continue pipeline, let SSO extraction decide.
-        # This avoids false negatives on new RSC shapes.
-        if not any(x in text_l for x in hard_fail):
-            return True
-
+        # Unknown response shapes are not sufficient evidence of account creation.
         return False
 
     # ----------------------------------------------------------------- SSO extraction
