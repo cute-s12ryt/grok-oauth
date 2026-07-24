@@ -4,7 +4,7 @@ Drives the vendored ``grok-build-auth/xconsole_client`` protocol client to:
 
 1. register an x.ai account with MoeMail + YesCaptcha
 2. extract SSO/session cookies
-3. convert SSO via sso_to_auth_json into a local auth.json entry
+3. exchange the registration session through Device Flow (default) or OAuth
 4. import that entry into the multi-account pool
 
 Import of ``xconsole_client`` is deferred so the main API can start even when
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import sys
 import threading
@@ -89,6 +90,55 @@ LOCAL_SOLVER_WAIT_SEC = float(
 LOCAL_SOLVER_POLL_SEC = float(
     os.environ.get("GROK2API_LOCAL_SOLVER_POLL_SEC", "1.0") or 1.0
 )
+
+
+def registration_auth_flow(value: str | None = None) -> str:
+    """Resolve the registration token exchange without changing it silently."""
+    raw = os.environ.get("GROK2API_REG_AUTH_FLOW", "device") if value is None else value
+    flow = str(raw or "device").strip().lower()
+    if flow not in {"device", "oauth"}:
+        raise ValueError(
+            "GROK2API_REG_AUTH_FLOW must be either 'device' or 'oauth'"
+        )
+    return flow
+
+
+def extract_xai_otp(item: dict[str, Any]) -> str | None:
+    """Extract and normalize a six-character xAI email verification code."""
+    text = "\n".join(
+        str(item.get(key) or "")
+        for key in (
+            "subject",
+            "content",
+            "text",
+            "textBody",
+            "html",
+            "htmlBody",
+            "body",
+            "from_address",
+            "from",
+            "verificationCode",
+        )
+    )
+    match = re.search(r"\b([A-Z0-9]{3})-([A-Z0-9]{3})\b", text, flags=re.I)
+    if match:
+        return "".join(match.groups()).upper()
+
+    match = re.search(r"\b([A-Z0-9]{6})\b", text, flags=re.I)
+    if match and "x.ai" in text.lower():
+        return match.group(1).upper()
+
+    codes: list[Any] = []
+    extracted = item.get("extracted")
+    if isinstance(extracted, dict):
+        raw_codes = extracted.get("codes")
+        if isinstance(raw_codes, (list, tuple)):
+            codes = list(raw_codes)
+    for code in codes:
+        clean = str(code).replace("-", "").strip().upper()
+        if re.fullmatch(r"[A-Z0-9]{6}", clean):
+            return clean
+    return None
 
 # --------------------------------------------------------------------------- #
 # session state
@@ -1421,8 +1471,6 @@ def _make_email_receiver(
             poll_interval: float | None = None,
             on_tick=None,
         ) -> str:
-            import re as _re
-
             deadline = time.time() + float(timeout or 120)
             # Keep polls short so cooperative cancel can land quickly.
             poll = float(poll_interval if poll_interval is not None else 1.0)
@@ -1462,39 +1510,9 @@ def _make_email_receiver(
                             token=self.token or None,
                         )
                     for item in messages:
-                        # Prefer xAI AAA-BBB codes first.
-                        text = "\n".join(
-                            str(item.get(k) or "")
-                            for k in (
-                                "subject",
-                                "content",
-                                "text",
-                                "textBody",
-                                "html",
-                                "htmlBody",
-                                "body",
-                                "from_address",
-                                "from",
-                                "verificationCode",
-                            )
-                        )
-                        match = _re.search(
-                            r"\b([A-Z0-9]{3})-([A-Z0-9]{3})\b", text, flags=_re.I
-                        )
-                        if match:
-                            return "".join(match.groups()).upper()
-                        # Also accept plain 6-char alnum codes from xAI mails.
-                        match2 = _re.search(
-                            r"\b([A-Z0-9]{6})\b", text, flags=_re.I
-                        )
-                        if match2 and "x.ai" in text.lower():
-                            return match2.group(1).upper()
-                        extracted = item.get("extracted") or {}
-                        codes = extracted.get("codes") or []
-                        for code in codes:
-                            clean = str(code).replace("-", "").strip().upper()
-                            if len(clean) == 6 and _re.fullmatch(r"[A-Z0-9]{6}", clean):
-                                return clean
+                        code = extract_xai_otp(item)
+                        if code:
+                            return code
                 except Exception:
                     pass
                 # Heartbeat for admin UI so waiting_email is not a silent freeze.
@@ -2909,10 +2927,6 @@ def _run_registration(
         )
         from xconsole_client import config as C
         from xconsole_client.oauth_protocol import extract_cookies_from_auth_client
-        from xconsole_client.xai_oauth import (
-            CLIPROXYAPI_GROK_HEADERS,
-            build_cliproxyapi_auth_record,
-        )
         import grok2api.pool.accounts as accounts
         from grok2api.config import UPSTREAM_BASE
 
@@ -3633,22 +3647,48 @@ def _run_registration(
                 "visible to CreateSession."
             )
 
-        # Required path: SSO/session JWT -> sso_to_auth_json device flow -> auth.json
-        update(
-            "importing",
-            f"SSO obtained; converting via sso_to_auth_json [{ADAPTER_BUILD}]",
-        )
+        auth_flow = registration_auth_flow()
         import scripts.sso_to_auth_json as sso_import
 
-        token = sso_import.sso_to_token(sso)
-        if not token or not token.get("access_token"):
-            _note_reg_pressure("device-flow conversion failed", pause_sec=10)
-            raise RuntimeError(
-                "SSO obtained but sso_to_auth_json conversion failed "
-                "(device verify/approve/token poll; often xAI device-flow "
-                "rate_limited/slow_down under concurrent registration). "
-                f"adapter_build={ADAPTER_BUILD}; sso_prefix={sso[:24]!r}"
+        if auth_flow == "device":
+            update(
+                "importing",
+                f"SSO obtained; converting via sso_to_auth_json [{ADAPTER_BUILD}]",
             )
+            token = sso_import.sso_to_token(sso)
+            if not token or not token.get("access_token"):
+                _note_reg_pressure("device-flow conversion failed", pause_sec=10)
+                raise RuntimeError(
+                    "SSO obtained but sso_to_auth_json conversion failed "
+                    "(device verify/approve/token poll; often xAI device-flow "
+                    "rate_limited/slow_down under concurrent registration). "
+                    f"adapter_build={ADAPTER_BUILD}; sso_prefix={sso[:24]!r}"
+                )
+            auth_path = "sso_to_auth_json"
+        else:
+            update(
+                "importing",
+                f"SSO obtained; authorizing Grok Build OAuth [{ADAPTER_BUILD}]",
+            )
+            oauth_result = xai_oauth_login_protocol(
+                email,
+                password,
+                yescaptcha_key=solver_key if provider == "yescaptcha" else "",
+                proxy=proxy or "",
+                debug=True,
+                session_cookies=session_cookies,
+                auth_client=client,
+                persist=False,
+            )
+            token = oauth_result.token if oauth_result else None
+            if not token or not token.get("access_token"):
+                raise RuntimeError(
+                    "SSO obtained but Grok Build OAuth failed to return an access token; "
+                    "Device Flow fallback is disabled for GROK2API_REG_AUTH_FLOW=oauth. "
+                    f"adapter_build={ADAPTER_BUILD}"
+                )
+            auth_path = "xai_oauth_protocol"
+
         _key, entry = sso_import.token_to_auth_entry(token, email=email)
         # Keep the raw SSO cookie with the account so export/re-import works
         # after process restart (registration sessions are ephemeral).
@@ -3776,7 +3816,7 @@ def _run_registration(
         sess["imported_account_ids"] = imported_ids
         sess["imported_accounts"] = imported_accounts
         sess["oauth"] = {
-            "path": "sso_to_auth_json",
+            "path": auth_path,
             "access_token": (token.get("access_token") or "")[:20] + "...",
             "refresh_token": bool(token.get("refresh_token")),
             "email": email,
