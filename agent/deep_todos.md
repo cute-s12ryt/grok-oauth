@@ -17,4 +17,9 @@
 
 ## 待辦
 
-- 推送 Go Foundation CI 修復並確認 GitHub Actions `Compatibility contracts` 通過。
+- 無。
+
+## 完成驗證
+
+- GitHub Actions `Compatibility contracts` run `30129765025` 已通過。
+- `contracts` 與 `go-foundation` jobs 均成功，包含 Ubuntu race test、build 與版本 pin gate。

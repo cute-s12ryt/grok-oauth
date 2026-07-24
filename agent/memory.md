@@ -383,6 +383,7 @@
 - release version pin gate：通過，Python、Go 與 `.release-commit` 均為 `2.0.4`。
 - LSP：環境未安裝 `gopls`，以 vet、完整測試、build 與人工 diff 審查替代。
 - Race test：Windows 本機 `CGO_ENABLED=0` 無法執行，交由 Ubuntu GitHub Actions 驗證。
+- GitHub Actions：`Compatibility contracts` run `30129765025` 通過；Ubuntu 的格式、vet、完整測試、race、build、版本 pin 與 contracts jobs 均成功。
 
 ## 六角度檢查
 
