@@ -354,3 +354,41 @@
 ## 敏感資料處理
 
 本段紀錄不保存密碼、OTP、SSO、完整 authorize URL、state、nonce、PKCE verifier/challenge、authorization code、access token、refresh token、Cookie 或 session token。
+
+---
+
+# Go Foundation CI 修復紀錄
+
+## 基本資訊
+
+- 日期：2026-07-25
+- 目標 workflow：`.github/workflows/compatibility.yml` 的 `go-foundation`
+- 根因：7 個 Go 檔案未通過 `gofmt`，另有 Grep schema 與 shell argv 引號的過期測試期待。
+
+## 本輪修改
+
+1. 對 CI 在 LF checkout 真正列出的 7 個 Go 檔案套用 `gofmt`。
+2. Grep 的 `search` alias 測試改為期待 required field `pattern`，與正式 schema 及正規化邏輯一致。
+3. shell argv 含空白 token 的測試改為期待雙引號，對齊既有 PowerShell-safe 實作。
+4. 將 `.release-commit` 從 `v2.0.3` 對齊 Python 與 Go 目前版本 `v2.0.4`。
+5. 未修改 workflow，也未變更正式 shell 或 Grep 執行行為。
+
+## 驗證結果
+
+- LF 乾淨 clone：`gofmt -l cmd internal` 無輸出。
+- `go vet ./...`：通過。
+- `go test ./...`：通過。
+- `go build ./cmd/grok2api`：通過。
+- `go build ./cmd/grok2api-migrate`：通過。
+- release version pin gate：通過，Python、Go 與 `.release-commit` 均為 `2.0.4`。
+- LSP：環境未安裝 `gopls`，以 vet、完整測試、build 與人工 diff 審查替代。
+- Race test：Windows 本機 `CGO_ENABLED=0` 無法執行，交由 Ubuntu GitHub Actions 驗證。
+
+## 六角度檢查
+
+1. **邏輯錯誤**：修正 Grep `query`／`pattern` 與 shell 單／雙引號的 stale tests。
+2. **效能問題**：僅格式與測試契約調整，未增加執行期計算或 I/O。
+3. **安全性**：未變更權限、輸入處理或敏感資料流程。
+4. **使用者體驗**：測試失敗訊息與實際 schema 一致，CI 診斷更準確。
+5. **型別安全**：JSON 欄位期待與 required schema 一致；完整 Go 測試與 vet 通過。
+6. **可維護性**：同步過期註解與所有相同 shell expected values，避免寬鬆測試掩蓋舊契約。
