@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 import secrets
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse
 
 from . import grpcweb
@@ -49,6 +49,32 @@ CREATE_COOKIE_SETTER_RPC = "https://accounts.x.ai/auth_mgmt.AuthManagement/Creat
 ACCOUNTS_ORIGIN = "https://accounts.x.ai"
 # Observed Next.js server action for the consent Allow button (may change on deploy).
 SUBMIT_OAUTH2_CONSENT_ACTION = "4005315a1d7e426de592990bb54bb37471f39dd6d2"
+
+
+def extract_consent_action_id(
+    page_html: str,
+    chunk_texts: Iterable[str] = (),
+) -> str:
+    """Extract the live submitOAuth2Consent server action, with a safe fallback."""
+    sources = [page_html or "", *(text or "" for text in chunk_texts)]
+    specific_patterns = (
+        r'createServerReference\)\("([a-f0-9]{40,44})"[^)]{0,600}submitOAuth2Consent',
+        r'([a-f0-9]{40,44})[^\n]{0,600}submitOAuth2Consent',
+    )
+    for source in sources:
+        for pattern in specific_patterns:
+            match = re.search(pattern, source, flags=re.IGNORECASE)
+            if match:
+                return match.group(1)
+    for source in sources:
+        match = re.search(
+            r'createServerReference\)\("([a-f0-9]{40,44})"',
+            source,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return match.group(1)
+    return SUBMIT_OAUTH2_CONSENT_ACTION
 
 
 def _enc_msg(field_no: int, raw: bytes) -> bytes:
@@ -548,7 +574,7 @@ class ProtocolOAuthClient:
             detail = (qs.get("error_description") or qs.get("error") or [""])[0]
             raise RuntimeError(f"authorization failed: {detail}")
         got_state = (qs.get("state") or [""])[0]
-        if got_state and got_state != expected_state:
+        if got_state != expected_state:
             raise RuntimeError("authorization failed: state mismatch")
         code = (qs.get("code") or [""])[0]
         if not code:
@@ -570,6 +596,7 @@ class ProtocolOAuthClient:
         cliproxyapi_disabled: bool = False,
         proxy: str = "",
         session_cookies: Optional[Dict[str, str]] = None,
+        persist: bool = True,
     ) -> OAuthLoginResult:
         scopes = scopes or list(DEFAULT_SCOPES)
         if session_cookies:
@@ -636,13 +663,7 @@ class ProtocolOAuthClient:
             """POST Next.js submitOAuth2Consent server action; return authorization code."""
             import json as _json
 
-            action_id = SUBMIT_OAUTH2_CONSENT_ACTION
-            # Prefer live action id from page chunks if present.
-            m = re.search(r'createServerReference\)\("([a-f0-9]{40,44})"[^)]*submitOAuth2Consent', page_html)
-            if not m:
-                m = re.search(r'createServerReference\)\("([a-f0-9]{40,44})"', page_html)
-            if m:
-                action_id = m.group(1)
+            action_id = extract_consent_action_id(page_html)
 
             # Router state tree for consent page (URL-encoded JSON).
             from urllib.parse import quote as _quote
@@ -796,6 +817,7 @@ class ProtocolOAuthClient:
             cliproxyapi_auth_dir=cliproxyapi_auth_dir,
             cliproxyapi_base_url=cliproxyapi_base_url,
             cliproxyapi_disabled=cliproxyapi_disabled,
+            persist=persist,
         )
 
 
@@ -814,6 +836,7 @@ def login_with_protocol(
     redirect_port: int = 56121,
     session_cookies: Optional[Dict[str, str]] = None,
     auth_client: Any = None,
+    persist: bool = True,
 ) -> OAuthLoginResult:
     """Convenience wrapper: protocol OAuth + optional CLIProxyAPI Build export.
 
@@ -847,4 +870,5 @@ def login_with_protocol(
         redirect_port=redirect_port,
         proxy=proxy,
         session_cookies=session_cookies,
+        persist=persist,
     )

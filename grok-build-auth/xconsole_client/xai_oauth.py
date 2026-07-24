@@ -458,6 +458,7 @@ def _finalize_oauth_code(
     cliproxyapi_auth_dir: Optional[str | Path] = None,
     cliproxyapi_base_url: str = CLIPROXYAPI_GROK_BASE_URL,
     cliproxyapi_disabled: bool = False,
+    persist: bool = True,
 ) -> OAuthLoginResult:
     token = exchange_code_for_token(
         code=code,
@@ -467,7 +468,11 @@ def _finalize_oauth_code(
         proxy=proxy,
     )
     userinfo = fetch_userinfo(str(token.get("access_token") or ""), proxy=proxy)
-    path = save_oauth_record(token, userinfo=userinfo, client_id=client_id, output_dir=output_dir)
+    path = (
+        save_oauth_record(token, userinfo=userinfo, client_id=client_id, output_dir=output_dir)
+        if persist
+        else None
+    )
     cliproxy_path: Optional[Path] = None
     if cliproxyapi_auth_dir:
         cliproxy_path = save_cliproxyapi_auth_record(
@@ -514,6 +519,7 @@ def login_with_browser(
     cliproxyapi_auth_dir: Optional[str | Path] = None,
     cliproxyapi_base_url: str = CLIPROXYAPI_GROK_BASE_URL,
     cliproxyapi_disabled: bool = False,
+    persist: bool = True,
 ) -> OAuthLoginResult:
     scopes = scopes or list(DEFAULT_SCOPES)
     server, sink, auth_url, redirect_uri, state, verifier = _start_pkce_callback_server(
@@ -539,6 +545,7 @@ def login_with_browser(
             cliproxyapi_auth_dir=cliproxyapi_auth_dir,
             cliproxyapi_base_url=cliproxyapi_base_url,
             cliproxyapi_disabled=cliproxyapi_disabled,
+            persist=persist,
         )
     finally:
         server.shutdown()
@@ -638,6 +645,7 @@ def login_with_playwright(
     cliproxyapi_base_url: str = CLIPROXYAPI_GROK_BASE_URL,
     cliproxyapi_disabled: bool = False,
     session_cookies: Optional[Dict[str, str]] = None,
+    persist: bool = True,
 ) -> OAuthLoginResult:
     """Complete xAI OAuth with Playwright.
 
@@ -746,6 +754,7 @@ def login_with_playwright(
             cliproxyapi_auth_dir=cliproxyapi_auth_dir,
             cliproxyapi_base_url=cliproxyapi_base_url,
             cliproxyapi_disabled=cliproxyapi_disabled,
+            persist=persist,
         )
     finally:
         server.shutdown()
@@ -768,6 +777,7 @@ def complete_build_oauth(
     debug: bool = False,
     session_cookies: Optional[Dict[str, str]] = None,
     auth_client: Any = None,
+    persist: bool = True,
 ) -> OAuthLoginResult:
     """Obtain Grok Build/CLI OAuth tokens after protocol signup.
 
@@ -793,6 +803,7 @@ def complete_build_oauth(
                 redirect_port=port or 56121,
                 session_cookies=session_cookies,
                 auth_client=auth_client,
+                persist=persist,
             )
         except Exception as exc:
             errors.append(f"protocol OAuth failed: {exc}")
@@ -809,6 +820,7 @@ def complete_build_oauth(
             cliproxyapi_auth_dir=cliproxyapi_auth_dir,
             cliproxyapi_base_url=cliproxyapi_base_url,
             session_cookies=session_cookies,
+            persist=persist,
         )
     except Exception as auto_err:
         errors.append(f"playwright OAuth failed: {auto_err}")
@@ -821,6 +833,7 @@ def complete_build_oauth(
             proxy=proxy,
             cliproxyapi_auth_dir=cliproxyapi_auth_dir,
             cliproxyapi_base_url=cliproxyapi_base_url,
+            persist=persist,
         )
 
 
