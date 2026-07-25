@@ -25,6 +25,7 @@ from __future__ import annotations
 import re
 import secrets
 import time
+from html import unescape as html_unescape
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse
 
@@ -75,6 +76,63 @@ def extract_consent_action_id(
         if match:
             return match.group(1)
     return SUBMIT_OAUTH2_CONSENT_ACTION
+
+
+def consent_post_url(page_url: str) -> str:
+    """Return the live consent URL without dropping its OAuth transaction query."""
+    parsed = urlparse(page_url)
+    if parsed.scheme != "https" or parsed.netloc.lower() != "accounts.x.ai":
+        raise RuntimeError("OAuth consent failed: unexpected consent URL")
+    if parsed.path.rstrip("/") != "/oauth2/consent":
+        raise RuntimeError("OAuth consent failed: unexpected consent path")
+    if not parsed.query:
+        raise RuntimeError("OAuth consent failed: missing transaction query")
+    return page_url
+
+
+def safe_url_label(url: str) -> str:
+    """Return an origin/path label with query and fragment credentials removed."""
+    parsed = urlparse(url or "")
+    if not parsed.scheme or not parsed.netloc:
+        return parsed.path or "<relative-url>"
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
+
+
+def oauth_error_from_response(text: str = "", location: str = "") -> Optional[str]:
+    """Extract a provider OAuth error without returning callback secrets."""
+    candidates = [html_unescape(location or ""), html_unescape(text or "")]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        urls = re.findall(r"https?://[^\"'\s<>]+", candidate)
+        for raw_url in [candidate, *urls]:
+            query = parse_qs(urlparse(raw_url).query)
+            error = (query.get("error") or [""])[0]
+            if error:
+                detail = (query.get("error_description") or [error])[0]
+                return unquote(str(detail)).strip() or str(error)
+        is_full_html = bool(re.search(r"<html\b", candidate, flags=re.IGNORECASE))
+        if not is_full_html and len(candidate) <= 4096:
+            for pattern in (
+                r'"error_description"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"',
+                r'"error"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"',
+            ):
+                match = re.search(pattern, candidate, flags=re.IGNORECASE)
+                if match:
+                    return match.group(1).replace(r"\u0020", " ").strip()
+        visible_text = re.sub(
+            r"<(script|style)\b[^>]*>.*?</\1>",
+            " ",
+            candidate,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        visible_text = re.sub(r"<[^>]+>", " ", visible_text)
+        visible_text = re.sub(r"\s+", " ", visible_text).strip()
+        if len(visible_text) <= 500 and re.search(
+            r"\baccess[ _-]?denied\b", visible_text, flags=re.IGNORECASE
+        ):
+            return "access_denied"
+    return None
 
 
 def _enc_msg(field_no: int, raw: bytes) -> bytes:
@@ -476,7 +534,7 @@ class ProtocolOAuthClient:
         visited: set[str] = set()
 
         for hop in range(max_hops):
-            self._log(f"hop {hop}: {current[:160]}")
+            self._log(f"hop {hop}: {safe_url_label(current)}")
             # Never let the HTTP client connect to localhost callback.
             if current.startswith(redirect_uri) or (
                 "code=" in current and "state=" in current and "127.0.0.1" in current
@@ -495,12 +553,12 @@ class ProtocolOAuthClient:
                 key = "rt:" + pending_return_to
                 if key not in visited:
                     visited.add(key)
-                    self._log(f"account page → return_to {pending_return_to[:140]}")
+                    self._log(f"account page → return_to {safe_url_label(pending_return_to)}")
                     current = pending_return_to
                     continue
 
             if current in visited and hop > 2:
-                raise RuntimeError(f"OAuth redirect loop at {current[:180]}")
+                raise RuntimeError(f"OAuth redirect loop at {safe_url_label(current)}")
             visited.add(current)
 
             resp = self._get(current, allow_redirects=False)
@@ -559,7 +617,8 @@ class ProtocolOAuthClient:
                     current = pending_return_to
                     continue
                 raise RuntimeError(
-                    f"OAuth redirect chain stalled at HTTP {status} {current[:180]} "
+                    f"OAuth redirect chain stalled at HTTP {status} "
+                    f"{safe_url_label(current)} "
                     f"(no authorization code)."
                 )
             continue
@@ -578,7 +637,7 @@ class ProtocolOAuthClient:
             raise RuntimeError("authorization failed: state mismatch")
         code = (qs.get("code") or [""])[0]
         if not code:
-            raise RuntimeError(f"authorization failed: missing code in {url[:200]}")
+            raise RuntimeError("authorization failed: missing code in callback")
         return code
 
     def login(
@@ -653,7 +712,7 @@ class ProtocolOAuthClient:
             loc = resp.headers.get("location") or resp.headers.get("Location") or ""
             if loc:
                 nxt = urljoin(setter_url, loc)
-                self._log(f"set-cookie Location → {nxt[:160]}")
+                self._log(f"set-cookie Location → {safe_url_label(nxt)}")
                 return nxt
             if success:
                 return success
@@ -698,13 +757,18 @@ class ProtocolOAuthClient:
                 "sec-fetch-dest": "empty",
             }
             self._log(f"submitOAuth2Consent action={action_id[:16]}...")
-            resp = self._s.post(page_url.split("?")[0] if "consent" in page_url else page_url,
-                                headers=headers, data=body, timeout=45)
-            # Some deployments post to the consent path with query string:
-            if resp.status_code >= 400 or (resp.text and "error" in resp.text[:200].lower() and "code" not in resp.text):
-                resp = self._s.post(page_url, headers=headers, data=body, timeout=45)
+            # The query string identifies the pending OAuth transaction. Posting
+            # to the bare path first can reject or consume that transaction.
+            target_url = consent_post_url(page_url)
+            resp = self._s.post(target_url, headers=headers, data=body, timeout=45)
             text = resp.text or ""
-            self._log(f"consent action HTTP {resp.status_code} body={text[:180]!r}")
+            self._log(f"consent action HTTP {resp.status_code} body_bytes={len(text)}")
+            loc = resp.headers.get("location") or resp.headers.get("Location") or ""
+            provider_error = oauth_error_from_response(text, loc)
+            if provider_error:
+                raise RuntimeError(
+                    f"OAuth consent failed: {provider_error} (HTTP {resp.status_code})"
+                )
             # Response may be RSC flight text containing JSON with code.
             m = re.search(r'"code"\s*:\s*"([^"]+)"', text)
             if m:
@@ -713,10 +777,12 @@ class ProtocolOAuthClient:
             if m and "error" not in m.group(0):
                 return m.group(1)
             # Or redirect header
-            loc = resp.headers.get("location") or resp.headers.get("Location") or ""
             if "code=" in loc:
                 return self._code_from_url(urljoin(page_url, loc), state)
-            raise RuntimeError(f"submitOAuth2Consent failed HTTP {resp.status_code}: {text[:300]}")
+            raise RuntimeError(
+                f"submitOAuth2Consent failed HTTP {resp.status_code}: "
+                f"no authorization result (body_bytes={len(text)})"
+            )
 
         def _complete_via_cookie_setter(label: str) -> str:
             """Mint set-cookie chain with consent as success_url, then Allow consent."""
@@ -730,7 +796,7 @@ class ProtocolOAuthClient:
             if not csl.get("ok"):
                 raise RuntimeError(f"{label}: CreateCookieSetterLink failed: {csl.get('error')}")
             setter = str(csl.get("cookie_setter_url") or "")
-            self._log(f"{label}: cookie_setter={setter[:100]}...")
+            self._log(f"{label}: cookie_setter={safe_url_label(setter)}")
 
             # Apply set-cookie hop without overwriting sso incorrectly.
             current = setter
@@ -743,7 +809,10 @@ class ProtocolOAuthClient:
                     # Only GET set-cookie; use response Set-Cookie (do not clobber sso with config.token).
                     resp = self._get(current, allow_redirects=False)
                     loc = resp.headers.get("location") or resp.headers.get("Location") or ""
-                    self._log(f"set-cookie HTTP {resp.status_code} loc={(loc or '')[:120]}")
+                    self._log(
+                        f"set-cookie HTTP {resp.status_code} "
+                        f"loc={safe_url_label(urljoin(current, loc)) if loc else '<none>'}"
+                    )
                     if loc:
                         current = urljoin(current, loc)
                         continue
@@ -757,7 +826,12 @@ class ProtocolOAuthClient:
                 loc = page.headers.get("location") or page.headers.get("Location") or ""
                 if loc and "code=" in loc:
                     return self._code_from_url(urljoin(current, loc), state)
-                if page.status_code == 200 and "Authorize" in (page.text or ""):
+                page_error = oauth_error_from_response(page.text or "", loc)
+                if page_error:
+                    raise RuntimeError(
+                        f"OAuth consent page failed: {page_error} (HTTP {page.status_code})"
+                    )
+                if page.status_code == 200:
                     return _submit_oauth2_consent(current, page.text or "")
             return self._follow_for_code(current, redirect_uri=redirect_uri, state=state)
 

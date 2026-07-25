@@ -10,7 +10,10 @@ sys.path.insert(0, str(ROOT / "grok-build-auth"))
 from xconsole_client.oauth_protocol import (
     ProtocolOAuthClient,
     SUBMIT_OAUTH2_CONSENT_ACTION,
+    consent_post_url,
     extract_consent_action_id,
+    oauth_error_from_response,
+    safe_url_label,
 )
 from xconsole_client import xai_oauth
 
@@ -35,6 +38,14 @@ class PkceStateTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "state mismatch"):
             ProtocolOAuthClient._code_from_url(url, "expected")
 
+    def test_provider_access_denied_is_preserved(self) -> None:
+        url = (
+            "http://127.0.0.1/callback?error=access_denied"
+            "&error_description=Access%20denied&state=expected"
+        )
+        with self.assertRaisesRegex(RuntimeError, "Access denied"):
+            ProtocolOAuthClient._code_from_url(url, "expected")
+
 
 class ConsentActionExtractionTests(unittest.TestCase):
     def test_extracts_specific_inline_action(self) -> None:
@@ -55,6 +66,51 @@ class ConsentActionExtractionTests(unittest.TestCase):
 
     def test_falls_back_to_observed_action(self) -> None:
         self.assertEqual(extract_consent_action_id("<html></html>"), SUBMIT_OAUTH2_CONSENT_ACTION)
+
+
+class ConsentRequestTests(unittest.TestCase):
+    def test_post_url_preserves_oauth_transaction_query(self) -> None:
+        url = (
+            "https://accounts.x.ai/oauth2/consent?client_id=client-id"
+            "&state=expected&code_challenge=challenge"
+        )
+        self.assertEqual(consent_post_url(url), url)
+
+    def test_post_url_rejects_missing_transaction_query(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "missing transaction query"):
+            consent_post_url("https://accounts.x.ai/oauth2/consent")
+
+    def test_post_url_rejects_unexpected_origin(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "unexpected consent URL"):
+            consent_post_url("https://example.com/oauth2/consent?state=expected")
+
+    def test_safe_url_label_removes_query_and_fragment(self) -> None:
+        url = "https://accounts.x.ai/oauth2/consent?state=secret#code=secret"
+        self.assertEqual(safe_url_label(url), "https://accounts.x.ai/oauth2/consent")
+
+
+class OAuthErrorExtractionTests(unittest.TestCase):
+    def test_extracts_callback_error_description_without_code(self) -> None:
+        location = (
+            "http://127.0.0.1:56121/callback?error=access_denied"
+            "&error_description=Access%20denied&state=secret-state"
+        )
+        self.assertEqual(oauth_error_from_response(location=location), "Access denied")
+
+    def test_extracts_rsc_json_error(self) -> None:
+        text = '1:{"error":"access_denied","code":"sensitive-code"}'
+        self.assertEqual(oauth_error_from_response(text), "access_denied")
+
+    def test_ignores_success_response(self) -> None:
+        self.assertIsNone(oauth_error_from_response('1:{"code":"authorization-code"}'))
+
+    def test_ignores_error_translation_inside_full_consent_page(self) -> None:
+        html = (
+            "<html><body><h1>Authorize Grok Build</h1>"
+            "<script>window.messages={\"access_denied\":\"Access denied\"}</script>"
+            + "</body></html>"
+        )
+        self.assertIsNone(oauth_error_from_response(html))
 
 
 class OAuthPersistenceTests(unittest.TestCase):
