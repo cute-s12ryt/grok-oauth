@@ -1,3 +1,45 @@
+# Grok Build OAuth Access denied 修復紀錄
+
+## 基本資訊
+
+- 日期：2026-07-25
+- 範圍：管理台協議註冊的 Grok Build Authorization Code + PKCE 路徑
+- 症狀：consent 階段可能回傳 `Access denied`，且既有錯誤訊息無法可靠指出失敗階段
+
+## 根因與修復
+
+1. consent Server Action 原先先 POST 至移除 query string 的 `/oauth2/consent`，遺失 `client_id`、`state`、PKCE challenge 等交易上下文。
+2. 錯誤的第一次提交可能拒絕或消耗 pending transaction，之後再以完整 URL 重送也無法可靠恢復。
+3. 現改為只使用完整 consent URL 提交，並對 origin、path 及 transaction query fail-closed 驗證。
+4. 移除依賴 `Authorize` 英文文案的判斷；HTTP 200 consent 頁直接依 Server Action 流程處理。
+5. callback query、短 RSC/JSON 與短可見錯誤頁會解析 provider 錯誤，`access_denied` 明確標示為 consent 階段。
+6. debug log 不再輸出 consent 本文或 OAuth URL query，避免 authorization code、state、PKCE 等單次資料洩漏。
+
+## 驗證結果
+
+- Python `unittest discover -s tests`：29 項全部通過。
+- Python `compileall`：通過。
+- `go vet ./...`：通過。
+- `go test ./...`：通過。
+- `go build ./cmd/grok2api`：通過。
+- `go build ./cmd/grok2api-migrate`：通過。
+- Python LSP：環境未安裝 `basedpyright-langserver`，以測試、編譯與人工 diff 審查替代。
+
+## 六角度檢查
+
+1. **邏輯錯誤**：修復 consent query 遺失、具副作用的重送及按鈕文案相依。
+2. **效能問題**：移除一次不必要的 consent 網路請求，未新增額外 I/O。
+3. **安全性**：完整 URL 僅用於請求、不寫入錯誤；移除可能包含 authorization code 的 debug 本文。
+4. **使用者體驗**：provider `access_denied` 與描述會保留並標示 consent 階段。
+5. **型別安全**：helper 具明確輸入／回傳型別，缺少 query 或來源不符時 fail-closed。
+6. **可維護性**：consent URL 與錯誤解析拆為純函式，已有獨立回歸測試。
+
+## 敏感資料處理
+
+本段不保存完整 authorize/consent URL、state、nonce、PKCE verifier/challenge、authorization code、access token、refresh token、Cookie 或 session token。
+
+---
+
 # xAI 與 Grok 註冊流程實測紀錄
 
 ## 基本資訊

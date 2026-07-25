@@ -1,5 +1,13 @@
 # 專案歷史任務
 
+## 2026-07-25：Grok Build OAuth Access denied 修復
+
+- 修正 consent Server Action 錯誤先送至裸路徑、遺失 OAuth transaction query 的問題。
+- 移除 consent 重複提交及英文按鈕文案相依，新增階段化 provider 錯誤解析。
+- 移除可能洩漏 authorization code 的 debug 本文預覽。
+- 新增 consent URL、`access_denied`、HTML 假陽性與 PKCE callback 回歸測試。
+- 驗證 Python 29 項測試、compileall、Go vet、完整 Go 測試及兩個 Go binary build。
+
 ## 2026-07-25：管理台註冊與 OAuth 整合
 
 - 完成 xAI、Grok.com 與 Grok Build OAuth 實測。
